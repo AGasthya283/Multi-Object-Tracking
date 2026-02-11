@@ -1,4 +1,5 @@
 # Multi-Object Tracking (MOT) System with Depth Estimation
+![](./image.png)
 
 A comprehensive real-time Multi-Object Tracking system built with Streamlit, featuring YOLOv8 detection, multiple tracking algorithms (SORT, DeepSORT, BYTETrack), and depth estimation using MiDaS.
 
