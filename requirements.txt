@@ -1,0 +1,15 @@
+streamlit
+opencv-python
+opencv-contrib-python
+numpy
+scipy
+torch
+torchvision
+ultralytics
+yt-dlp
+filterpy
+pillow
+matplotlib
+scikit-learn
+lap
+timm
