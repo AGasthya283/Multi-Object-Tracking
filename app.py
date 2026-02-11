@@ -120,40 +120,11 @@ def process_video(video_path, weights_path, tracker_name, confidence_threshold, 
     output_dir = '/tmp/mot_outputs'
     os.makedirs(output_dir, exist_ok=True)
     
-    # Use H264 codec for better Streamlit compatibility
-    # Try different codecs in order of preference
-    codecs_to_try = [
-        ('avc1', '.mp4'),  # H264 - best for web
-        ('mp4v', '.mp4'),  # MPEG-4
-        ('X264', '.mp4'),  # Alternative H264
-    ]
-    
-    codec_found = False
-    for codec, ext in codecs_to_try:
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*codec)
-            test_writer = cv2.VideoWriter(
-                f'{output_dir}/test{ext}', fourcc, fps, (width, height))
-            if test_writer.isOpened():
-                test_writer.release()
-                os.remove(f'{output_dir}/test{ext}')
-                codec_found = True
-                break
-        except:
-            continue
-    
-    if not codec_found:
-        codec = 'mp4v'  # Fallback
-        ext = '.mp4'
-    
-    fourcc = cv2.VideoWriter_fourcc(*codec)
-    
-    original_writer = cv2.VideoWriter(
-        f'{output_dir}/original{ext}', fourcc, fps, (width, height))
-    tracking_writer = cv2.VideoWriter(
-        f'{output_dir}/tracking{ext}', fourcc, fps, (width, height))
-    depth_writer = cv2.VideoWriter(
-        f'{output_dir}/depth{ext}', fourcc, fps, (width, height))
+    # Save frames to temporary directory first, then encode with ffmpeg
+    frames_dir = f'{output_dir}/frames'
+    os.makedirs(f'{frames_dir}/original', exist_ok=True)
+    os.makedirs(f'{frames_dir}/tracking', exist_ok=True)
+    os.makedirs(f'{frames_dir}/depth', exist_ok=True)
     
     # Track history for polylines
     track_history = defaultdict(lambda: [])
@@ -164,6 +135,7 @@ def process_video(video_path, weights_path, tracker_name, confidence_threshold, 
     status_text = st.empty()
     
     frame_idx = 0
+    saved_frames = []
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -234,10 +206,12 @@ def process_video(video_path, weights_path, tracker_name, confidence_threshold, 
         # Depth estimation
         depth_frame = depth_estimator.estimate(frame)
         
-        # Write frames
-        original_writer.write(original_frame)
-        tracking_writer.write(tracking_frame)
-        depth_writer.write(depth_frame)
+        # Save frames as images
+        cv2.imwrite(f'{frames_dir}/original/frame_{frame_idx:06d}.jpg', original_frame)
+        cv2.imwrite(f'{frames_dir}/tracking/frame_{frame_idx:06d}.jpg', tracking_frame)
+        cv2.imwrite(f'{frames_dir}/depth/frame_{frame_idx:06d}.jpg', depth_frame)
+        
+        saved_frames.append(frame_idx)
         
         # Update progress
         frame_idx += 1
@@ -245,19 +219,80 @@ def process_video(video_path, weights_path, tracker_name, confidence_threshold, 
         progress_bar.progress(progress)
         status_text.text(f"Processing frame {frame_idx}/{total_frames}")
     
-    # Release resources
+    # Release capture
     cap.release()
-    original_writer.release()
-    tracking_writer.release()
-    depth_writer.release()
+    
+    # Encode videos using ffmpeg
+    status_text.text("Encoding videos for web playback...")
+    
+    def encode_video_ffmpeg(frames_path, output_path, fps):
+        """Encode frames to H.264 video using ffmpeg"""
+        import subprocess
+        
+        # Check if ffmpeg is available
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to opencv if ffmpeg not available
+            return encode_video_opencv(frames_path, output_path, fps, width, height)
+        
+        # Use ffmpeg for guaranteed H.264 encoding
+        cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output
+            '-framerate', str(fps),
+            '-i', f'{frames_path}/frame_%06d.jpg',
+            '-c:v', 'libx264',  # H.264 codec
+            '-pix_fmt', 'yuv420p',  # Compatibility
+            '-crf', '23',  # Quality (lower = better)
+            '-preset', 'fast',
+            '-movflags', '+faststart',  # Web optimization
+            output_path
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, check=True, timeout=300)
+            return True
+        except Exception as e:
+            print(f"FFmpeg encoding failed: {e}")
+            return encode_video_opencv(frames_path, output_path, fps, width, height)
+    
+    def encode_video_opencv(frames_path, output_path, fps, w, h):
+        """Fallback encoding using OpenCV"""
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+        
+        for idx in saved_frames:
+            frame = cv2.imread(f'{frames_path}/frame_{idx:06d}.jpg')
+            if frame is not None:
+                out.write(frame)
+        
+        out.release()
+        return True
+    
+    # Encode all three videos
+    original_path = f'{output_dir}/original.mp4'
+    tracking_path = f'{output_dir}/tracking.mp4'
+    depth_path = f'{output_dir}/depth.mp4'
+    
+    encode_video_ffmpeg(f'{frames_dir}/original', original_path, fps)
+    encode_video_ffmpeg(f'{frames_dir}/tracking', tracking_path, fps)
+    encode_video_ffmpeg(f'{frames_dir}/depth', depth_path, fps)
+    
+    # Clean up frame files
+    import shutil
+    try:
+        shutil.rmtree(frames_dir)
+    except:
+        pass
     
     progress_bar.empty()
     status_text.empty()
     
     return {
-        'original': f'{output_dir}/original{ext}',
-        'tracking': f'{output_dir}/tracking{ext}',
-        'depth': f'{output_dir}/depth{ext}'
+        'original': original_path,
+        'tracking': tracking_path,
+        'depth': depth_path
     }
 
 def main():
@@ -438,21 +473,62 @@ def main():
     # Display results
     if st.session_state.get('processed', False) and st.session_state.get('output_paths'):
         st.markdown("---")
-        st.header("Results")
+        st.header("📊 Results")
+        
+        # Add display method selector
+        display_method = st.radio(
+            "Video Display Method",
+            ["Streamlit Native (Default)", "HTML5 Player (Alternative)"],
+            horizontal=True,
+            help="Try alternative if videos don't play"
+        )
         
         col1, col2, col3 = st.columns(3)
         
-        with col1:
-            st.subheader("Original Video")
-            st.video(st.session_state.output_paths['original'])
-        
-        with col2:
-            st.subheader(f"{tracker_name} Tracking")
-            st.video(st.session_state.output_paths['tracking'])
-        
-        with col3:
-            st.subheader("Depth Estimation")
-            st.video(st.session_state.output_paths['depth'])
+        if display_method == "Streamlit Native (Default)":
+            with col1:
+                st.subheader("Original Video")
+                st.video(st.session_state.output_paths['original'])
+            
+            with col2:
+                st.subheader(f"{tracker_name} Tracking")
+                st.video(st.session_state.output_paths['tracking'])
+            
+            with col3:
+                st.subheader("Depth Estimation")
+                st.video(st.session_state.output_paths['depth'])
+        else:
+            # Alternative: Use HTML5 video player with base64
+            import base64
+            
+            def get_video_html(video_path, title):
+                """Create HTML5 video player"""
+                with open(video_path, 'rb') as f:
+                    video_bytes = f.read()
+                video_base64 = base64.b64encode(video_bytes).decode()
+                
+                html = f"""
+                <div style="text-align: center;">
+                    <h4>{title}</h4>
+                    <video width="100%" controls>
+                        <source src="data:video/mp4;base64,{video_base64}" type="video/mp4">
+                        Your browser does not support the video tag.
+                    </video>
+                </div>
+                """
+                return html
+            
+            with col1:
+                st.markdown(get_video_html(st.session_state.output_paths['original'], "Original Video"), 
+                           unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(get_video_html(st.session_state.output_paths['tracking'], f"{tracker_name} Tracking"), 
+                           unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown(get_video_html(st.session_state.output_paths['depth'], "Depth Estimation"), 
+                           unsafe_allow_html=True)
         
         # Download buttons
         st.markdown("---")
